@@ -190,10 +190,8 @@ retry_db_command "\$SITE_COMMAND"
 # 4. Web-Dienst neu starten, um alle Änderungen zu übernehmen
 echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
 docker compose restart web
-
 EOF
 # WICHTIG: Nach diesem EOF darf KEIN Leerzeichen oder Tabulator kommen.
-
 # -------------------------------------------------------------------
 # --- Ausgabe nach erfolgreicher Installation -----------------------
 # -------------------------------------------------------------------

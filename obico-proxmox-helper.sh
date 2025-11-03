@@ -221,9 +221,34 @@ echo "════════════════════════�
 echo "⚙️  Konfiguration erstellen"
 echo "═══════════════════════════════════════"
 
-# .env Datei erstellen
-cat > .env <<ENVFILE
-# Datenbank
+# Prüfe ob PostgreSQL in LXC funktioniert
+echo "🔍 Teste PostgreSQL Kompatibilität..."
+TEST_COMPOSE=$(cat <<'TESTCOMPOSE'
+services:
+  test-db:
+    image: postgres:14
+    environment:
+      POSTGRES_PASSWORD: test123
+    command: postgres -c shared_buffers=128MB
+TESTCOMPOSE
+)
+
+echo "$TEST_COMPOSE" > docker-compose.test.yml
+if timeout 30 docker compose -f docker-compose.test.yml up -d && sleep 10 && docker compose -f docker-compose.test.yml ps | grep -q "running"; then
+    echo "✓ PostgreSQL funktioniert in diesem Container"
+    USE_POSTGRES=true
+    docker compose -f docker-compose.test.yml down -v
+else
+    echo "⚠ PostgreSQL hat Probleme, verwende SQLite"
+    USE_POSTGRES=false
+    docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
+fi
+rm -f docker-compose.test.yml
+
+# .env Datei erstellen (mit bedingter DB-Konfiguration)
+if [ "$USE_POSTGRES" = true ]; then
+    cat > .env <<ENVFILE
+# Datenbank (PostgreSQL)
 POSTGRES_PASSWORD=${DB_PASS}
 POSTGRES_USER=obico
 POSTGRES_DB=obico
@@ -237,7 +262,7 @@ ALLOWED_HOSTS=${SITE_DOMAIN},${CONTAINER_IP},localhost,127.0.0.1
 SITE_USES_HTTPS=False
 SITE_IS_PUBLIC=True
 
-# Email (Optional - später konfigurierbar)
+# Email (Optional)
 EMAIL_HOST=localhost
 EMAIL_PORT=25
 DEFAULT_FROM_EMAIL=${ADMIN_EMAIL}
@@ -254,6 +279,62 @@ WEB_PORT=3334
 INTERNAL_MEDIA_HOST=http://web:3334
 OCTOPRINT_TUNNEL_PORT_RANGE=0-0
 ENVFILE
+else
+    # SQLite Konfiguration
+    cat > .env <<ENVFILE
+# Datenbank (SQLite - für LXC Kompatibilität)
+DATABASE_URL=sqlite:///data/db.sqlite3
+
+# Redis
+REDIS_PASSWORD=${REDIS_PASS}
+
+# Django Settings
+DEBUG=False
+ALLOWED_HOSTS=${SITE_DOMAIN},${CONTAINER_IP},localhost,127.0.0.1
+SITE_USES_HTTPS=False
+SITE_IS_PUBLIC=True
+
+# Email (Optional)
+EMAIL_HOST=localhost
+EMAIL_PORT=25
+DEFAULT_FROM_EMAIL=${ADMIN_EMAIL}
+
+# Obico Einstellungen
+ACCOUNT_ALLOW_SIGN_UP=True
+SOCIAL_LOGIN=False
+
+# Web Server
+WEB_HOST=0.0.0.0
+WEB_PORT=3334
+
+# Internes Netzwerk
+INTERNAL_MEDIA_HOST=http://web:3334
+OCTOPRINT_TUNNEL_PORT_RANGE=0-0
+ENVFILE
+
+    # Override für SQLite
+    cat > docker-compose.override.yml <<'OVERRIDE'
+services:
+  web:
+    environment:
+      - CSRF_TRUSTED_ORIGINS=http://${SITE_DOMAIN},http://${CONTAINER_IP}:3334
+      - DATABASE_URL=sqlite:////app/data/db.sqlite3
+    ports:
+      - "3334:3334"
+    restart: unless-stopped
+    volumes:
+      - sqlite_data:/app/data
+  
+  ml_api:
+    restart: unless-stopped
+  
+  redis:
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
+OVERRIDE
+fi
 
 echo "✓ .env Datei erstellt:"
 cat .env
@@ -276,7 +357,8 @@ fi
 echo "✓ Verwende Compose Datei: $COMPOSE_FILE"
 
 # Docker Compose Override für externe Zugriffe
-cat > docker-compose.override.yml <<'OVERRIDE'
+if [ "$USE_POSTGRES" = true ]; then
+    cat > docker-compose.override.yml <<'OVERRIDE'
 services:
   web:
     environment:
@@ -292,6 +374,7 @@ services:
     restart: unless-stopped
     volumes:
       - db_data:/var/lib/postgresql/data
+    command: postgres -c shared_buffers=128MB -c max_connections=100
   
   redis:
     restart: unless-stopped
@@ -299,6 +382,9 @@ services:
 volumes:
   db_data:
 OVERRIDE
+else
+    echo "ℹ SQLite Override bereits erstellt"
+fi
 
 echo "✓ docker-compose.override.yml erstellt"
 
@@ -321,10 +407,27 @@ echo "════════════════════════�
 echo "🗄️  Datenbank initialisieren"
 echo "═══════════════════════════════════════"
 
-# Warte auf Datenbank
-retry_command \
-    "docker compose -f '${COMPOSE_FILE}' exec -T db pg_isready -U obico" \
-    "Warte auf PostgreSQL..."
+if [ "$USE_POSTGRES" = true ]; then
+    # Prüfe Container Status
+    echo "🔍 Prüfe welche Container laufen..."
+    docker compose -f "${COMPOSE_FILE}" ps
+    
+    # Prüfe DB Container Logs
+    echo "📋 Datenbank Logs (letzte 20 Zeilen):"
+    docker compose -f "${COMPOSE_FILE}" logs db --tail=20
+    
+    # Stelle sicher dass DB läuft
+    echo "🔄 Stelle sicher dass DB läuft..."
+    docker compose -f "${COMPOSE_FILE}" up -d db
+    sleep 15
+    
+    # Warte auf Datenbank mit besserem Check
+    retry_command \
+        "docker compose -f '${COMPOSE_FILE}' exec -T db pg_isready -U obico" \
+        "Warte auf PostgreSQL..."
+else
+    echo "ℹ Verwende SQLite, keine separate DB nötig"
+fi
 
 # Migrationen ausführen
 retry_command \

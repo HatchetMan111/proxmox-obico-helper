@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ===============================================================
 # Obico Server - Proxmox Helper Script (Final Version)
-# Autor: Gemini (Basierend auf den Tests des Benutzers)
-# FIXES: WEB_HOST=0.0.0.0, Automatische Datenbank-Initialisierung (500-Fehler)
+# Autor: HatchetMan
+# FIXES: Unbekannter 'obico_server_init' Befehl ersetzt durch Standard-Django-Befehle
 # ===============================================================
 
 set -e
@@ -17,8 +17,9 @@ DB_PASS="obicodbpass"
 REDIS_PASS="obico123"
 ADMIN_EMAIL="obicoadmin@local.host"
 ADMIN_PASS="obicoAdminPass123"
+# Die IP wird später im Skript ermittelt und für den Site-Eintrag verwendet
 
-# --- Banner ---
+# --- Banner & User Input (Bleiben unverändert) ---
 clear
 echo -e "\e[1;36m──────────────────────────────────────────────"
 echo "    🧠 ${APP} - Proxmox Interactive Installer"
@@ -51,7 +52,7 @@ ROOTPASS=${ROOTPASS:-obicoAdmin}
 
 echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
 
-# --- Template Logik ---
+# --- Template Logik & LXC Erstellung (Bleiben unverändert) ---
 TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
 LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
 TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
@@ -61,7 +62,6 @@ if ! pveam list $TEMPLATE_STORE | grep -q "$(basename $LATEST_TEMPLATE)"; then
   pveam download $TEMPLATE_STORE $LATEST_TEMPLATE
 fi
 
-# --- LXC erstellen ---
 pct create $CTID $TEMPLATE \
   -hostname $HOSTNAME \
   -cores $CORE \
@@ -78,11 +78,24 @@ pct start $CTID
 echo "⏳ Warte 10 Sekunden, bis der Container gebootet ist..."
 sleep 10
 
-# --- Installation & Initialisierung im Container (Alle Fehler behoben) ---
-echo "🐳  Installiere Docker & ${APP}..."
+# --- IP-Adresse VOR der Installation abrufen (Wird für Site benötigt) ---
+echo "⏳ Ermittle Container IP-Adresse..."
+IP_ADDRESS=""
+for i in {1..15}; do
+  sleep 2
+  IP_ADDRESS=$(pct exec $CTID -- hostname -I 2>/dev/null | awk '{print $1}')
+  [ -n "$IP_ADDRESS" ] && break
+done
 
-# WICHTIG: Wir übergeben die benötigten Variablen sicher in den Container-Kontext
-# Hier verwenden wir KEINEN Quoting-Marker ('EOF'), um Variablen zu interpolieren.
+if [ -z "$IP_ADDRESS" ]; then
+    IP_ADDRESS="obico.local"
+    echo "⚠️ Konnte IP-Adresse nicht ermitteln. Verwende Hostnamen: ${IP_ADDRESS}"
+fi
+SITE_DOMAIN="${IP_ADDRESS}:3334"
+
+# --- Installation & Initialisierung im Container ---
+echo "🐳 Installiere Docker & ${APP}..."
+
 pct exec $CTID -- bash -e <<EOF
 
 # Container-Variablen aus dem Host-Skript setzen
@@ -91,6 +104,7 @@ REDIS_PASS="${REDIS_PASS}"
 ADMIN_EMAIL="${ADMIN_EMAIL}"
 ADMIN_PASS="${ADMIN_PASS}"
 GIT_URL="${GIT_URL}"
+SITE_DOMAIN="${SITE_DOMAIN}" # NEU: Für den Site-Eintrag
 
 # Warten auf Netzwerkverbindung und Installation
 sleep 5 
@@ -103,6 +117,8 @@ cd /opt
 git clone \${GIT_URL} obico
 cd obico
 
+# ... (Konfiguration von .env bleibt unverändert) ...
+
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
 elif [ -f ".env.template" ]; then
@@ -110,13 +126,11 @@ elif [ -f ".env.template" ]; then
 elif [ -f "compose.env.sample" ]; then
   cp compose.env.sample .env
 else
-  # Minimales .env erstellen, falls kein Template gefunden wird
   echo "POSTGRES_PASSWORD=\${DB_PASS}" > .env
   echo "REDIS_PASSWORD=\${REDIS_PASS}" >> .env
   echo "WEB_HOST=0.0.0.0" >> .env
 fi
 
-# Passwörter und Host in .env setzen/überschreiben (WEB_HOST Fix)
 sed -i "s#POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=\${DB_PASS}#" .env
 sed -i "s#REDIS_PASSWORD=.*#REDIS_PASSWORD=\${REDIS_PASS}#" .env
 sed -i "s#WEB_HOST=.*#WEB_HOST=0.0.0.0#" .env
@@ -136,44 +150,34 @@ fi
 
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
-# --- Initialisierung (Fix für 500 Error: Site matching query does not exist & TTY-Error) ---
+
+# --- Initialisierung (FIX FÜR UNBEKANNTEN BEFEHL UND 500 ERROR) ---
 echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
-sleep 20 # Mehr Zeit für DB-Start
+sleep 20 
 
 # 1. Migrationen anwenden
 echo "➡️  Führe Datenbank-Migrationen durch..."
-# Fügen Sie -T hinzu, um TTY-Fehler zu vermeiden
 docker compose run --rm -T web python manage.py migrate --noinput
 
-# 2. Obico Initialisierung (Site-Eintrag und Admin-Benutzer erstellen)
-echo "➡️  Erstelle Obico Admin-Benutzer (\${ADMIN_EMAIL})..."
-# Hier wird ebenfalls -T hinzugefügt, um die interaktive Eingabe zu erzwingen
-echo -e "\${ADMIN_EMAIL}\n\${ADMIN_PASS}\n\${ADMIN_PASS}" | docker compose run --rm -T web python manage.py obico_server_init
+# 2. Admin-Benutzer erstellen (Ersetzt obico_server_init Teil 1)
+echo "➡️  Erstelle Admin-Benutzer (\${ADMIN_EMAIL})..."
+echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('\${ADMIN_EMAIL}', '\${ADMIN_PASS}')" | docker compose run --rm -T web python manage.py shell
 
-# 3. Web-Dienst neu starten, um alle Änderungen zu übernehmen
+# 3. Site-Eintrag korrigieren/erstellen (Ersetzt obico_server_init Teil 2)
+# Dies ist kritisch, um den 'Site matching query does not exist' Fehler zu beheben.
+echo "➡️  Erstelle/Korrigiere Site-Eintrag: \${SITE_DOMAIN}..."
+echo "from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})" | docker compose run --rm -T web python manage.py shell
+
+# 4. Web-Dienst neu starten, um alle Änderungen zu übernehmen
 echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
 docker compose restart web
+
 EOF
-# WICHTIG: Nach diesem EOF darf KEIN Leerzeichen oder Tabulator kommen.
 
 # -------------------------------------------------------------------
 # --- Ausgabe nach erfolgreicher Installation -----------------------
 # -------------------------------------------------------------------
 clear
-# IP-Adresse dynamisch und sicher abrufen
-echo "⏳ Warte auf die Zuweisung der IP-Adresse..."
-IP_ADDRESS=""
-for i in {1..15}; do # Längere Wartezeit (bis zu 30 Sek.)
-  sleep 2
-  IP_ADDRESS=$(pct exec $CTID -- hostname -I 2>/dev/null | awk '{print $1}')
-  [ -n "$IP_ADDRESS" ] && break
-done
-
-if [ -z "$IP_ADDRESS" ]; then
-    IP_ADDRESS="N/A (Prüfe PVE Konsole)"
-    echo "❌ Konnte IP-Adresse nicht automatisch ermitteln."
-fi
-
 echo -e "\e[1;32m✅ ${APP} erfolgreich installiert und initialisiert!\e[0m"
 echo "──────────────────────────────────────────────"
 echo "📦 Container-ID : $CTID"

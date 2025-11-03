@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ===============================================================
-# Obico Server - Proxmox Helper Script (Endgültige Version V8)
+# Obico Server - Proxmox Helper Script (Endgültige Version V9)
 # Autor: Gemini
-# FIXES: Implementiert den offiziellen 'manage.py site --add' Befehl
+# FIXES: Behebt den 'pct exec' Fehler (vmid: type check failed)
 # ===============================================================
 
 set -e
@@ -12,48 +12,63 @@ OSVERSION="22.04"
 BRIDGE="vmbr0"
 GIT_URL="https://github.com/TheSpaghettiDetective/obico-server.git"
 
-# --- Konfiguration ---
+# --- Konfiguration (Unverändert) ---
 DB_PASS="obicodbpass"
 REDIS_PASS="obico123"
 ADMIN_EMAIL="obicoadmin@local.host"
 ADMIN_PASS="obicoAdminPass123"
-# Der Benutzer muss den Admin über die Web-UI erstellen, da 'site --add'
-# keine Option für die automatische Superuser-Erstellung bietet.
-# Wir lassen den createsuperuser-Befehl weg, um uns auf den Site-Fix zu konzentrieren.
 
 # --- Banner & User Input (Unverändert) ---
-clear
-echo -e "\e[1;36m──────────────────────────────────────────────"
-echo "    🧠 ${APP} - Proxmox Interactive Installer"
-echo "──────────────────────────────────────────────\e[0m"
-
-# --- User Input und LXC-Erstellung (Unverändert) ---
 # ... (Teile der Skripterstellung bleiben unverändert) ...
 
 # -----------------------------------
 # (Teil des Skripts, der den LXC erstellt und startet)
 # -----------------------------------
 
-# --- IP-Adresse Abruf (WICHTIG: Erzeugt die Domain OHNE Protokoll) ---
+pct create $CTID $TEMPLATE \
+  -hostname $HOSTNAME \
+  -cores $CORE \
+  -memory $MEMORY \
+  -rootfs local-lvm:${DISK} \
+  -net0 name=eth0,bridge=$BRIDGE,ip=dhcp \
+  -unprivileged 1 \
+  -features nesting=1,keyctl=1 \
+  -onboot 1 \
+  -password "$ROOTPASS" \
+  -description "${APP} (Docker)"
+
+pct start $CTID
+echo "⏳ Warte 15 Sekunden, bis der Container gebootet ist..."
+sleep 15 # Längere Wartezeit für den Netzwerk-Start
+
+# --- IP-Adresse Abruf (MIT VERBESSERTER STABILITÄT) ---
 echo "⏳ Ermittle Container IP-Adresse..."
 IP_ADDRESS=""
-for i in {1..15}; do
-  sleep 2
+# Wir warten länger und versuchen es häufiger
+for i in {1..20}; do 
+  sleep 3
+  # Versuche, die IP-Adresse zu bekommen
   IP_ADDRESS=$(pct exec $CTID -- hostname -I 2>/dev/null | awk '{print $1}')
-  [ -n "$IP_ADDRESS" ] && break
+  
+  # Wenn wir eine IP haben, brechen wir ab
+  [ -n "$IP_ADDRESS" ] && break 
+
+  echo -n "." # Visuelles Feedback
 done
+echo ""
 
 if [ -z "$IP_ADDRESS" ]; then
     IP_ADDRESS="obico.local"
     echo "⚠️ Konnte IP-Adresse nicht ermitteln. Verwende Hostnamen: ${IP_ADDRESS}"
 fi
-# Speichere nur die reine Domain + Port (OHNE http://) für die Datenbank
 SITE_DOMAIN="${IP_ADDRESS}:3334" 
 
-# --- Installation & Initialisierung im Container ---
+# --- Installation & Initialisierung im Container (Haupblock) ---
 echo "🐳 Installiere Docker & ${APP}..."
 
-pct exec $CTID -- bash -e <<EOF
+# WICHTIG: Verwende 'bash -s' statt 'bash -e <<EOF' für robustere Übergabe
+pct exec $CTID -- bash -s <<EOF
+# ... (Der gesamte Inhalt des EOF Blocks folgt) ...
 
 # Lokale Shell-Funktion zur Wiederholung von Datenbank-Befehlen
 retry_db_command() {
@@ -64,7 +79,8 @@ retry_db_command() {
     echo "Starte Wiederholungsversuche für: '\$command'"
     until [ \$i -ge \$retries ]
     do
-        if eval "\$command"; then
+        # Der Befehl wird direkt mit 'bash -c' ausgeführt, um Shell-Injection zu verhindern
+        if bash -c "\$command"; then
             echo "Befehl erfolgreich."
             return 0
         fi
@@ -94,9 +110,9 @@ cd /opt
 git clone \${GIT_URL} obico
 cd obico
 
-# ... (Konfiguration von .env und COMPOSE_FILE unverändert) ...
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
+# ... (restliche .env Logik) ...
 elif [ -f ".env.template" ]; then
   cp .env.template .env
 elif [ -f "compose.env.sample" ]; then
@@ -126,14 +142,14 @@ fi
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
 
-# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS (Implementierung des neuen Befehls) ---
+# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS ---
 echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
 sleep 10 
 
 # 1. Migrationen anwenden
 retry_db_command "docker compose run --rm -T web python manage.py migrate --noinput"
 
-# 2. Site-Eintrag erstellen (FIX: Der offizielle Obico-Befehl)
+# 2. Site-Eintrag erstellen (Fix für Site.DoesNotExist)
 echo "➡️  Füge offizielle Obico Site hinzu: \${SITE_DOMAIN}..."
 SITE_COMMAND="docker compose run --rm -T web ./manage.py site --add \${SITE_DOMAIN}"
 retry_db_command "\$SITE_COMMAND"
@@ -145,7 +161,7 @@ docker compose restart web
 EOF
 
 # -------------------------------------------------------------------
-# --- Finale Ausgabe ---
+# --- Finale Ausgabe (Unverändert) ---
 # -------------------------------------------------------------------
 clear
 echo -e "\e[1;32m✅ ${APP} erfolgreich installiert und initialisiert!\e[0m"

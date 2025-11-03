@@ -46,5 +46,4 @@ in einem LXC Container auf deinem **Proxmox VE Host** –
 komplett mit Docker & docker-compose.
 
 ```bash
-bash (curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-obico-helper/main/obico-proxmox-helper.sh)
----
+bash <(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-obico-helper/main/obico-proxmox-helper.sh)

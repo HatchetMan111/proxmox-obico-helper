@@ -95,8 +95,17 @@ else
   echo "REDIS_PASSWORD=obico123" >> .env
   echo "WEB_HOST=localhost" >> .env
 fi
-docker compose up -d
-
+# Finde Compose-Datei automatisch
+if [ -f "docker-compose.yml" ]; then
+  docker compose -f docker-compose.yml up -d
+elif [ -f "compose/docker-compose.yml" ]; then
+  docker compose -f compose/docker-compose.yml up -d
+elif [ -f "compose.yaml" ]; then
+  docker compose -f compose.yaml up -d
+else
+  echo "❌ Keine Docker Compose Datei gefunden! Bitte überprüfe das Repo."
+  exit 1
+fi
 sed -i 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=obicodbpass/' .env
 sed -i 's/REDIS_PASSWORD=.*/REDIS_PASSWORD=obico123/' .env
 sed -i 's/WEB_HOST=.*/WEB_HOST=localhost/' .env
@@ -114,5 +123,6 @@ echo "🌐 Zugriff       : http://${IP}:3334"
 echo "🧱 Admin-Setup   : /opt/obico im Container"
 echo "🔑 Root Passwort : $ROOTPASS"
 echo "──────────────────────────────────────────────"
+echo "🌐 Obico läuft unter: http://$(pct exec $CTID -- hostname -I | awk '{print $1}'):3334"
 echo "💡 Öffne den Link im Browser und führe das Setup durch."
 echo "──────────────────────────────────────────────"

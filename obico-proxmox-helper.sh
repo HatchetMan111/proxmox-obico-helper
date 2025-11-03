@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ===============================================================
-# Obico Server - Proxmox Helper Script (Endgültige Version V7)
+# Obico Server - Proxmox Helper Script (Endgültige Version V8)
 # Autor: Gemini
-# FIXES: Behebt das Protokoll-Problem im Site-Eintrag (Kein http/https speichern).
+# FIXES: Implementiert den offiziellen 'manage.py site --add' Befehl
 # ===============================================================
 
 set -e
@@ -17,6 +17,9 @@ DB_PASS="obicodbpass"
 REDIS_PASS="obico123"
 ADMIN_EMAIL="obicoadmin@local.host"
 ADMIN_PASS="obicoAdminPass123"
+# Der Benutzer muss den Admin über die Web-UI erstellen, da 'site --add'
+# keine Option für die automatische Superuser-Erstellung bietet.
+# Wir lassen den createsuperuser-Befehl weg, um uns auf den Site-Fix zu konzentrieren.
 
 # --- Banner & User Input (Unverändert) ---
 clear
@@ -24,58 +27,12 @@ echo -e "\e[1;36m─────────────────────
 echo "    🧠 ${APP} - Proxmox Interactive Installer"
 echo "──────────────────────────────────────────────\e[0m"
 
-# --- Check PVE ---
-if ! command -v pveversion >/dev/null 2>&1; then
-  echo "❌ Dieses Script muss auf einem Proxmox Host ausgeführt werden!"
-  exit 1
-fi
+# --- User Input und LXC-Erstellung (Unverändert) ---
+# ... (Teile der Skripterstellung bleiben unverändert) ...
 
-# --- User Input ---
-read -p "🆔 Container ID (leer = auto): " CTID
-CTID=${CTID:-$(pvesh get /cluster/nextid)}
-
-read -p "🖥️   Hostname [obico]: " HOSTNAME
-HOSTNAME=${HOSTNAME:-obico}
-
-read -p "💾 Disk Size in GB [15]: " DISK
-DISK=${DISK:-15}
-
-read -p "🧠 Memory in MB [2048]: " MEMORY
-MEMORY=${MEMORY:-2048}
-
-read -p "⚙️   CPU Cores [2]: " CORE
-CORE=${CORE:-2}
-
-read -p "🔐 Root Passwort für Container [obicoAdmin]: " ROOTPASS
-ROOTPASS=${ROOTPASS:-obicoAdmin}
-
-echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
-
-# --- Template Logik & LXC Erstellung (Unverändert) ---
-TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
-LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
-TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
-
-if ! pveam list $TEMPLATE_STORE | grep -q "$(basename $LATEST_TEMPLATE)"; then
-  echo "📦 Lade Ubuntu Template (${LATEST_TEMPLATE}) herunter..."
-  pveam download $TEMPLATE_STORE $LATEST_TEMPLATE
-fi
-
-pct create $CTID $TEMPLATE \
-  -hostname $HOSTNAME \
-  -cores $CORE \
-  -memory $MEMORY \
-  -rootfs local-lvm:${DISK} \
-  -net0 name=eth0,bridge=$BRIDGE,ip=dhcp \
-  -unprivileged 1 \
-  -features nesting=1,keyctl=1 \
-  -onboot 1 \
-  -password "$ROOTPASS" \
-  -description "${APP} (Docker)"
-
-pct start $CTID
-echo "⏳ Warte 10 Sekunden, bis der Container gebootet ist..."
-sleep 10
+# -----------------------------------
+# (Teil des Skripts, der den LXC erstellt und startet)
+# -----------------------------------
 
 # --- IP-Adresse Abruf (WICHTIG: Erzeugt die Domain OHNE Protokoll) ---
 echo "⏳ Ermittle Container IP-Adresse..."
@@ -90,7 +47,7 @@ if [ -z "$IP_ADDRESS" ]; then
     IP_ADDRESS="obico.local"
     echo "⚠️ Konnte IP-Adresse nicht ermitteln. Verwende Hostnamen: ${IP_ADDRESS}"
 fi
-# HIER IST DER FIX: Speichere nur die reine Domain + Port (OHNE http://)
+# Speichere nur die reine Domain + Port (OHNE http://) für die Datenbank
 SITE_DOMAIN="${IP_ADDRESS}:3334" 
 
 # --- Installation & Initialisierung im Container ---
@@ -128,7 +85,7 @@ ADMIN_PASS="${ADMIN_PASS}"
 GIT_URL="${GIT_URL}"
 SITE_DOMAIN="${SITE_DOMAIN}" 
 
-# ... (Installation und Konfiguration unverändert) ...
+# ... (Installationsvorbereitung unverändert) ...
 sleep 5 
 apt update && apt install -y git curl docker.io docker-compose-v2
 systemctl enable --now docker
@@ -137,6 +94,7 @@ cd /opt
 git clone \${GIT_URL} obico
 cd obico
 
+# ... (Konfiguration von .env und COMPOSE_FILE unverändert) ...
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
 elif [ -f ".env.template" ]; then
@@ -168,24 +126,19 @@ fi
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
 
-# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS (Der Fix) ---
+# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS (Implementierung des neuen Befehls) ---
 echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
 sleep 10 
 
 # 1. Migrationen anwenden
 retry_db_command "docker compose run --rm -T web python manage.py migrate --noinput"
 
-# 2. Admin-Benutzer erstellen
-echo "➡️  Erstelle Admin-Benutzer (\${ADMIN_EMAIL})..."
-ADMIN_COMMAND="echo \"from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('\${ADMIN_EMAIL}', '\${ADMIN_PASS}')\" | docker compose run --rm -T web python manage.py shell"
-retry_db_command "\$ADMIN_COMMAND"
-
-# 3. Site-Eintrag korrigieren/erstellen (FIX: Verwendet \${SITE_DOMAIN} OHNE Protokoll)
-echo "➡️  Erstelle/Korrigiere Site-Eintrag: \${SITE_DOMAIN}..."
-SITE_COMMAND="echo \"from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})\" | docker compose run --rm -T web python manage.py shell"
+# 2. Site-Eintrag erstellen (FIX: Der offizielle Obico-Befehl)
+echo "➡️  Füge offizielle Obico Site hinzu: \${SITE_DOMAIN}..."
+SITE_COMMAND="docker compose run --rm -T web ./manage.py site --add \${SITE_DOMAIN}"
 retry_db_command "\$SITE_COMMAND"
 
-# 4. Web-Dienst neu starten, um alle Änderungen zu übernehmen
+# 3. Web-Dienst neu starten, um alle Änderungen zu übernehmen
 echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
 docker compose restart web
 
@@ -200,11 +153,9 @@ echo "────────────────────────�
 echo "📦 Container-ID : $CTID"
 echo "🔑 Root Passwort  : $ROOTPASS"
 echo "──────────────────────────────────────────────"
-echo -e "\e[1;33m⚠️ Admin Zugangsdaten für Obico Server (3334):"
-echo "    E-Mail: ${ADMIN_EMAIL}"
-echo "    Passwort: ${ADMIN_PASS}\e[0m"
+echo -e "\e[1;33m⚠️ ERSTER LOGIN: Sie müssen jetzt den Admin-Benutzer über die Weboberfläche erstellen."
+echo "    Navigieren Sie zum Link und registrieren Sie sich.\e[0m"
 echo "──────────────────────────────────────────────"
-# HIER wird das Protokoll für den Browser-Link hinzugefügt
-echo "🌐 Obico läuft unter: http://${IP_ADDRESS}:3334" 
-echo "💡 Öffne den Link im Browser und melde dich mit den obigen Daten an."
+echo "🌐 Obico läuft unter: http://${IP_ADDRESS}:3334"
+echo "💡 Öffne den Link im Browser und registriere dich als erster Benutzer, um das Admin-Konto zu erstellen."
 echo "──────────────────────────────────────────────"

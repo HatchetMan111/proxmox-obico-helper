@@ -2,7 +2,7 @@
 # ===============================================================
 # Obico Server - Proxmox Helper Script (Local Installation)
 # Author: GPT-5 (Verbessert von Gemini)
-# Tested on Proxmox VE 8.x with Ubuntu 22.04 template
+# FIXES: WEB_HOST=0.0.0.0 & Automatischer Server-Init (500 Fehler)
 # ===============================================================
 
 set -e
@@ -11,6 +11,10 @@ OSTYPE="ubuntu"
 OSVERSION="22.04"
 BRIDGE="vmbr0"
 GIT_URL="https://github.com/TheSpaghettiDetective/obico-server.git"
+
+# --- Standardwerte für die Obico-Initialisierung ---
+OBICO_ADMIN_EMAIL="obicoadmin@local.host"
+OBICO_ADMIN_PASS="obicoAdminPass123"
 
 # --- Banner ---
 clear
@@ -73,9 +77,9 @@ pct start $CTID
 echo "⏳ Warte 10 Sekunden, bis der Container gebootet ist..."
 sleep 10
 
-# --- Installation im Container (Robuste Methode mit Heredoc) ---
+# --- Installation & Initialisierung im Container ---
 echo "🐳  Installiere Docker & ${APP}..."
-pct exec $CTID -- bash -e <<'EOF'
+pct exec $CTID -- bash -e <<EOF
 
 # Warten auf Netzwerkverbindung
 sleep 5 
@@ -87,10 +91,10 @@ systemctl enable --now docker
 
 # Obico Klonen
 cd /opt
-git clone https://github.com/TheSpaghettiDetective/obico-server.git obico
+git clone ${GIT_URL} obico
 cd obico
 
-# --- .env Datei erstellen und SOFORT KORREKT konfigurieren ---
+# --- .env Datei erstellen und konfigurieren ---
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
 elif [ -f ".env.template" ]; then
@@ -105,15 +109,11 @@ else
 fi
 
 # Passwörter und Host in .env setzen/überschreiben
-# (Verwende '#' als sed-Trennzeichen)
 sed -i 's#POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=obicodbpass#' .env
 sed -i 's#REDIS_PASSWORD=.*#REDIS_PASSWORD=obico123#' .env
-#
-# HIER IST DER WICHTIGE FIX: Setze WEB_HOST auf 0.0.0.0
-#
 sed -i 's#WEB_HOST=.*#WEB_HOST=0.0.0.0#' .env
 
-# --- Docker Compose Datei finden und Server starten ---
+# --- Docker Compose Datei finden ---
 COMPOSE_FILE=""
 if [ -f "docker-compose.yml" ]; then
   COMPOSE_FILE="docker-compose.yml"
@@ -126,8 +126,25 @@ else
   exit 1
 fi
 
-echo "🚀 Starte Obico Server mit ${COMPOSE_FILE}..."
+echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "${COMPOSE_FILE}" up -d
+
+# --- Initialisierung (Fix für 500 Error: Site matching query does not exist) ---
+echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
+sleep 15 # Zusätzliche Wartezeit, damit die Datenbank wirklich bereit ist
+
+# 1. Migrationen anwenden
+echo "➡️  Führe Datenbank-Migrationen durch..."
+docker compose run --rm web python manage.py migrate --noinput
+
+# 2. Obico Initialisierung (Site-Eintrag und Admin-Benutzer erstellen)
+# Wir nutzen 'echo' zur automatischen Eingabe von E-Mail/Passwort.
+echo "➡️  Erstelle Obico Admin-Benutzer (${OBICO_ADMIN_EMAIL})..."
+echo -e "${OBICO_ADMIN_EMAIL}\n${OBICO_ADMIN_PASS}\n${OBICO_ADMIN_PASS}" | docker compose run --rm web python manage.py obico_server_init
+
+# 3. Web-Dienst neu starten, um alle Änderungen zu übernehmen
+echo "🔄 Starte Obico Web-Dienst neu..."
+docker compose restart web
 
 EOF
 
@@ -141,12 +158,16 @@ while [ -z "$IP_ADDRESS" ]; do
   IP_ADDRESS=$(pct exec $CTID -- hostname -I | awk '{print $1}')
 done
 
-echo -e "\e[1;32m✅ ${APP} erfolgreich installiert!\e[0m"
+echo -e "\e[1;32m✅ ${APP} erfolgreich installiert und initialisiert!\e[0m"
 echo "──────────────────────────────────────────────"
 echo "📦 Container-ID : $CTID"
 echo "🧱 Admin-Setup    : /opt/obico im Container"
 echo "🔑 Root Passwort  : $ROOTPASS"
 echo "──────────────────────────────────────────────"
+echo -e "\e[1;33m⚠️ Admin Zugangsdaten für Obico Server (3334):"
+echo "    E-Mail: ${OBICO_ADMIN_EMAIL}"
+echo "    Passwort: ${OBICO_ADMIN_PASS}\e[0m"
+echo "──────────────────────────────────────────────"
 echo "🌐 Obico läuft unter: http://${IP_ADDRESS}:3334"
-echo "💡 Öffne den Link im Browser und führe das Setup durch."
+echo "💡 Öffne den Link im Browser und melde dich mit den obigen Daten an."
 echo "──────────────────────────────────────────────"

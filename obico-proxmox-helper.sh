@@ -46,7 +46,6 @@ ROOTPASS=${ROOTPASS:-obicoAdmin}
 echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
 
 # --- Find valid template storage automatically ---
-# --- Dynamisches Ubuntu-Template finden ---
 TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
 LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
 TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
@@ -91,7 +90,7 @@ cd /opt
 git clone https://github.com/TheSpaghettiDetective/obico-server.git obico
 cd obico
 
-# --- .env Datei erstellen und konfigurieren ---
+# --- .env Datei erstellen und SOFORT KORREKT konfigurieren ---
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
 elif [ -f ".env.template" ]; then
@@ -102,14 +101,17 @@ else
   # Minimales .env erstellen, falls kein Template gefunden wird
   echo "POSTGRES_PASSWORD=obicodbpass" > .env
   echo "REDIS_PASSWORD=obico123" >> .env
-  echo "WEB_HOST=localhost" >> .env
+  echo "WEB_HOST=0.0.0.0" >> .env
 fi
 
 # Passwörter und Host in .env setzen/überschreiben
-# (Verwende '#' als sed-Trennzeichen, falls Passwörter '/' enthalten)
+# (Verwende '#' als sed-Trennzeichen)
 sed -i 's#POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=obicodbpass#' .env
 sed -i 's#REDIS_PASSWORD=.*#REDIS_PASSWORD=obico123#' .env
-sed -i 's#WEB_HOST=.*#WEB_HOST=localhost#' .env
+#
+# HIER IST DER WICHTIGE FIX: Setze WEB_HOST auf 0.0.0.0
+#
+sed -i 's#WEB_HOST=.*#WEB_HOST=0.0.0.0#' .env
 
 # --- Docker Compose Datei finden und Server starten ---
 COMPOSE_FILE=""
@@ -132,7 +134,12 @@ EOF
 # --- Ausgabe ---
 clear
 # IP-Adresse dynamisch und sicher abrufen
-IP_ADDRESS=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+echo "⏳ Warte auf die Zuweisung der IP-Adresse..."
+IP_ADDRESS=""
+while [ -z "$IP_ADDRESS" ]; do
+  sleep 2
+  IP_ADDRESS=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+done
 
 echo -e "\e[1;32m✅ ${APP} erfolgreich installiert!\e[0m"
 echo "──────────────────────────────────────────────"

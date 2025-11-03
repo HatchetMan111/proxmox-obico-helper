@@ -136,24 +136,23 @@ fi
 
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
-
-# --- Initialisierung (Fix für 500 Error: Site matching query does not exist) ---
+# --- Initialisierung (Fix für 500 Error: Site matching query does not exist & TTY-Error) ---
 echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
 sleep 20 # Mehr Zeit für DB-Start
 
 # 1. Migrationen anwenden
 echo "➡️  Führe Datenbank-Migrationen durch..."
-docker compose run --rm web python manage.py migrate --noinput
+# Fügen Sie -T hinzu, um TTY-Fehler zu vermeiden
+docker compose run --rm -T web python manage.py migrate --noinput
 
 # 2. Obico Initialisierung (Site-Eintrag und Admin-Benutzer erstellen)
 echo "➡️  Erstelle Obico Admin-Benutzer (\${ADMIN_EMAIL})..."
-# Hier wird 'echo -e' verwendet, um E-Mail/Passwort automatisch einzugeben.
-echo -e "\${ADMIN_EMAIL}\n\${ADMIN_PASS}\n\${ADMIN_PASS}" | docker compose run --rm web python manage.py obico_server_init
+# Hier wird ebenfalls -T hinzugefügt, um die interaktive Eingabe zu erzwingen
+echo -e "\${ADMIN_EMAIL}\n\${ADMIN_PASS}\n\${ADMIN_PASS}" | docker compose run --rm -T web python manage.py obico_server_init
 
 # 3. Web-Dienst neu starten, um alle Änderungen zu übernehmen
 echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
 docker compose restart web
-
 EOF
 # WICHTIG: Nach diesem EOF darf KEIN Leerzeichen oder Tabulator kommen.
 

@@ -96,6 +96,8 @@ else
   echo "REDIS_PASSWORD=obico123" >> .env
   echo "WEB_HOST=localhost" >> .env
 fi
+docker compose up -d
+"
 sed -i 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=obicodbpass/' .env
 sed -i 's/REDIS_PASSWORD=.*/REDIS_PASSWORD=obico123/' .env
 sed -i 's/WEB_HOST=.*/WEB_HOST=localhost/' .env

@@ -1,4 +1,12 @@
 # 🧠 Proxmox Helper Script — Obico Server (Local Install)
+Dieses Repository steht unter der MIT License
+.
+Basierend auf Obico Server
+.
+
+💡 Entwickelt mit ❤️ für Maker & 3D-Druck-Enthusiasten.
+
+🧠 „Detect spaghetti before it happens!“
 
 [![Proxmox](https://img.shields.io/badge/Proxmox-VE%208.x-orange?logo=proxmox)](https://www.proxmox.com)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20LTS-blue?logo=ubuntu)](https://ubuntu.com)

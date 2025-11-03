@@ -46,20 +46,15 @@ ROOTPASS=${ROOTPASS:-obicoAdmin}
 echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
 
 # --- Find valid template storage automatically ---
-TEMPLATE_STORE=$(pvesm status | awk '$2 == "dir" && /active/ {print $1; exit}')
-if [ -z "$TEMPLATE_STORE" ]; then
-  echo "❌ Kein gültiger Storage vom Typ 'dir' gefunden!"
-  echo "Bitte überprüfe mit: pvesm status"
-  exit 1
-fi
+# --- Dynamisches Ubuntu-Template finden ---
+TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
+LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
+TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
 
-TEMPLATE_FILE="ubuntu-${OSVERSION}-standard_amd64.tar.zst"
-TEMPLATE="${TEMPLATE_STORE}:vztmpl/${TEMPLATE_FILE}"
-
-if ! pveam list $TEMPLATE_STORE | grep -q "$TEMPLATE_FILE"; then
-  echo "📦 Lade Ubuntu ${OSVERSION} Template in '$TEMPLATE_STORE' herunter..."
-  pveam update
-  pveam download $TEMPLATE_STORE $TEMPLATE_FILE
+# --- Template herunterladen falls nötig ---
+if ! pveam list $TEMPLATE_STORE | grep -q "$(basename $LATEST_TEMPLATE)"; then
+  echo "📦 Lade Ubuntu Template (${LATEST_TEMPLATE}) herunter..."
+  pveam download $TEMPLATE_STORE $LATEST_TEMPLATE
 fi
 
 # --- LXC erstellen ---

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ===============================================================
-# Obico Server - Proxmox Helper Script (Final Version)
-# Autor: HatchetMan
-# FIXES: Unbekannter 'obico_server_init' Befehl ersetzt durch Standard-Django-Befehle
+# Obico Server - Proxmox Helper Script (Endgültige Version)
+# Autor: Gemini
+# FIXES: Behebt den hartnäckigen "Error 500: Site matching query does not exist"
+#        durch aggressive Retry-Loops für die Datenbank-Befehle.
 # ===============================================================
 
 set -e
@@ -12,14 +13,13 @@ OSVERSION="22.04"
 BRIDGE="vmbr0"
 GIT_URL="https://github.com/TheSpaghettiDetective/obico-server.git"
 
-# --- Konfiguration (Wird an den Container übergeben) ---
+# --- Konfiguration ---
 DB_PASS="obicodbpass"
 REDIS_PASS="obico123"
 ADMIN_EMAIL="obicoadmin@local.host"
 ADMIN_PASS="obicoAdminPass123"
-# Die IP wird später im Skript ermittelt und für den Site-Eintrag verwendet
 
-# --- Banner & User Input (Bleiben unverändert) ---
+# --- Banner & User Input (Unverändert) ---
 clear
 echo -e "\e[1;36m──────────────────────────────────────────────"
 echo "    🧠 ${APP} - Proxmox Interactive Installer"
@@ -52,7 +52,7 @@ ROOTPASS=${ROOTPASS:-obicoAdmin}
 
 echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
 
-# --- Template Logik & LXC Erstellung (Bleiben unverändert) ---
+# --- Template Logik & LXC Erstellung (Unverändert) ---
 TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
 LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
 TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
@@ -78,7 +78,7 @@ pct start $CTID
 echo "⏳ Warte 10 Sekunden, bis der Container gebootet ist..."
 sleep 10
 
-# --- IP-Adresse VOR der Installation abrufen (Wird für Site benötigt) ---
+# --- IP-Adresse Abruf ---
 echo "⏳ Ermittle Container IP-Adresse..."
 IP_ADDRESS=""
 for i in {1..15}; do
@@ -98,29 +98,49 @@ echo "🐳 Installiere Docker & ${APP}..."
 
 pct exec $CTID -- bash -e <<EOF
 
+# Lokale Shell-Funktion zur Wiederholung von Datenbank-Befehlen (Fix für Race Condition)
+retry_db_command() {
+    local command=\$1
+    local retries=15
+    local i=0
+    
+    echo "Starte Wiederholungsversuche für: '\$command'"
+    until [ \$i -ge \$retries ]
+    do
+        if eval "\$command"; then
+            echo "Befehl erfolgreich."
+            return 0
+        fi
+        i=\$((i+1))
+        echo "Befehl fehlgeschlagen. Versuch \$i/\$retries. Warte 5 Sekunden..."
+        sleep 5
+    done
+
+    echo "❌ Befehl konnte nach \$retries Versuchen nicht erfolgreich ausgeführt werden."
+    return 1
+}
+
 # Container-Variablen aus dem Host-Skript setzen
 DB_PASS="${DB_PASS}"
 REDIS_PASS="${REDIS_PASS}"
 ADMIN_EMAIL="${ADMIN_EMAIL}"
 ADMIN_PASS="${ADMIN_PASS}"
 GIT_URL="${GIT_URL}"
-SITE_DOMAIN="${SITE_DOMAIN}" # NEU: Für den Site-Eintrag
+SITE_DOMAIN="${SITE_DOMAIN}" 
 
-# Warten auf Netzwerkverbindung und Installation
+# ... (Installation und Konfiguration unverändert) ...
 sleep 5 
 apt update && apt upgrade -y
 apt install -y git curl docker.io docker-compose-v2
 systemctl enable --now docker
 
-# Obico Klonen und .env konfigurieren
 cd /opt
 git clone \${GIT_URL} obico
 cd obico
 
-# ... (Konfiguration von .env bleibt unverändert) ...
-
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
+# ... (restliche .env Logik) ...
 elif [ -f ".env.template" ]; then
   cp .env.template .env
 elif [ -f "compose.env.sample" ]; then
@@ -135,7 +155,6 @@ sed -i "s#POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=\${DB_PASS}#" .env
 sed -i "s#REDIS_PASSWORD=.*#REDIS_PASSWORD=\${REDIS_PASS}#" .env
 sed -i "s#WEB_HOST=.*#WEB_HOST=0.0.0.0#" .env
 
-# --- Docker Compose Datei finden ---
 COMPOSE_FILE=""
 if [ -f "docker-compose.yml" ]; then
   COMPOSE_FILE="docker-compose.yml"
@@ -151,28 +170,29 @@ fi
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
 
-# --- Initialisierung (FIX FÜR UNBEKANNTEN BEFEHL UND 500 ERROR) ---
+# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS (Der Fix) ---
 echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
-sleep 20 
+sleep 10 # Erste Wartezeit
 
 # 1. Migrationen anwenden
-echo "➡️  Führe Datenbank-Migrationen durch..."
-docker compose run --rm -T web python manage.py migrate --noinput
+retry_db_command "docker compose run --rm -T web python manage.py migrate --noinput"
 
-# 2. Admin-Benutzer erstellen (Ersetzt obico_server_init Teil 1)
+# 2. Admin-Benutzer erstellen (Fix für Site.DoesNotExist)
 echo "➡️  Erstelle Admin-Benutzer (\${ADMIN_EMAIL})..."
-echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('\${ADMIN_EMAIL}', '\${ADMIN_PASS}')" | docker compose run --rm -T web python manage.py shell
+ADMIN_COMMAND="echo \"from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('\${ADMIN_EMAIL}', '\${ADMIN_PASS}')\" | docker compose run --rm -T web python manage.py shell"
+retry_db_command "\$ADMIN_COMMAND"
 
-# 3. Site-Eintrag korrigieren/erstellen (Ersetzt obico_server_init Teil 2)
-# Dies ist kritisch, um den 'Site matching query does not exist' Fehler zu beheben.
+# 3. Site-Eintrag korrigieren/erstellen (Der direkte Fix für Site.DoesNotExist)
 echo "➡️  Erstelle/Korrigiere Site-Eintrag: \${SITE_DOMAIN}..."
-echo "from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})" | docker compose run --rm -T web python manage.py shell
+SITE_COMMAND="echo \"from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})\" | docker compose run --rm -T web python manage.py shell"
+retry_db_command "\$SITE_COMMAND"
 
 # 4. Web-Dienst neu starten, um alle Änderungen zu übernehmen
 echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
 docker compose restart web
 
 EOF
+# WICHTIG: Nach diesem EOF darf KEIN Leerzeichen oder Tabulator kommen.
 
 # -------------------------------------------------------------------
 # --- Ausgabe nach erfolgreicher Installation -----------------------

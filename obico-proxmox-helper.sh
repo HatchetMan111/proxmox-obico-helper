@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ===============================================================
-# Obico Server - Proxmox Helper Script (Verbesserte Version V10)
-# Fixes: Error 500, Django Site Konfiguration, Externe Zugriffe
+# Obico Server - Proxmox Helper Script (Fixed Version V11)
+# Fixes: Variable substitution, Error 500, Django Site Config
 # ===============================================================
 
 set -e
@@ -15,13 +15,12 @@ GIT_URL="https://github.com/TheSpaghettiDetective/obico-server.git"
 DB_PASS="obicodbpass"
 REDIS_PASS="obico123"
 ADMIN_EMAIL="admin@obico.local"
-ADMIN_PASS="obicoAdminPass123"
 
 # --- Farbcodes ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # --- Banner ---
 clear
@@ -124,12 +123,20 @@ fi
 
 echo -e "${GREEN}🌐 Obico wird konfiguriert für: ${SITE_DOMAIN}${NC}"
 
-# --- Hauptinstallation im Container ---
-echo "🐳 Starte Installation im Container..."
+# --- Installation-Script in temporäre Datei schreiben ---
+INSTALL_SCRIPT="/tmp/obico_install_$CTID.sh"
 
-pct exec $CTID -- bash -c "$(cat <<'CONTAINER_SCRIPT'
+cat > "$INSTALL_SCRIPT" <<'EOFSCRIPT'
 #!/bin/bash
 set -e
+
+# Variablen werden vom Host gesetzt
+DB_PASS="$1"
+REDIS_PASS="$2"
+ADMIN_EMAIL="$3"
+GIT_URL="$4"
+SITE_DOMAIN="$5"
+CONTAINER_IP="$6"
 
 # Funktion für Retry-Logik
 retry_command() {
@@ -153,21 +160,18 @@ retry_command() {
     return 1
 }
 
-# Variablen aus Host übernehmen
-DB_PASS="__DB_PASS__"
-REDIS_PASS="__REDIS_PASS__"
-ADMIN_EMAIL="__ADMIN_EMAIL__"
-GIT_URL="__GIT_URL__"
-SITE_DOMAIN="__SITE_DOMAIN__"
-CONTAINER_IP="__CONTAINER_IP__"
-
 echo "═══════════════════════════════════════"
 echo "🔧 Systemvorbereitung"
 echo "═══════════════════════════════════════"
 
+# Locale fix
+export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
 # Grundsystem aktualisieren
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+apt-get upgrade -y
 
 # Docker installieren
 echo "📦 Installiere Docker..."
@@ -191,17 +195,27 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker
 systemctl start docker
 
+# Docker Status prüfen
+echo "🔍 Prüfe Docker Status..."
+docker --version
+docker compose version
+
 echo "═══════════════════════════════════════"
 echo "📥 Obico Server klonen"
 echo "═══════════════════════════════════════"
 
 cd /opt
 if [ -d "obico" ]; then
+    echo "⚠ Altes obico Verzeichnis gefunden, entferne es..."
     rm -rf obico
 fi
 
-git clone ${GIT_URL} obico
+echo "📦 Clone Repository: $GIT_URL"
+git clone "$GIT_URL" obico
 cd /opt/obico
+
+echo "✓ Repository erfolgreich geklont"
+ls -la
 
 echo "═══════════════════════════════════════"
 echo "⚙️  Konfiguration erstellen"
@@ -226,6 +240,7 @@ SITE_IS_PUBLIC=True
 # Email (Optional - später konfigurierbar)
 EMAIL_HOST=localhost
 EMAIL_PORT=25
+DEFAULT_FROM_EMAIL=${ADMIN_EMAIL}
 
 # Obico Einstellungen
 ACCOUNT_ALLOW_SIGN_UP=True
@@ -240,7 +255,8 @@ INTERNAL_MEDIA_HOST=http://web:3334
 OCTOPRINT_TUNNEL_PORT_RANGE=0-0
 ENVFILE
 
-echo "✓ .env Datei erstellt"
+echo "✓ .env Datei erstellt:"
+cat .env
 
 # Docker Compose Datei finden
 COMPOSE_FILE=""
@@ -248,20 +264,23 @@ if [ -f "docker-compose.yml" ]; then
     COMPOSE_FILE="docker-compose.yml"
 elif [ -f "compose/docker-compose.yml" ]; then
     COMPOSE_FILE="compose/docker-compose.yml"
+elif [ -f "docker-compose.yaml" ]; then
+    COMPOSE_FILE="docker-compose.yaml"
 else
     echo "❌ Keine docker-compose.yml gefunden!"
+    echo "Verfügbare Dateien:"
+    ls -la
     exit 1
 fi
 
-echo "✓ Verwende: $COMPOSE_FILE"
+echo "✓ Verwende Compose Datei: $COMPOSE_FILE"
 
-# Docker Compose Datei anpassen für externe Zugriffe
+# Docker Compose Override für externe Zugriffe
 cat > docker-compose.override.yml <<'OVERRIDE'
-version: '3'
 services:
   web:
     environment:
-      - CSRF_TRUSTED_ORIGINS=http://${SITE_DOMAIN}
+      - CSRF_TRUSTED_ORIGINS=http://${SITE_DOMAIN},http://${CONTAINER_IP}:3334
     ports:
       - "3334:3334"
     restart: unless-stopped
@@ -287,7 +306,12 @@ echo "════════════════════════�
 echo "🚀 Docker Container starten"
 echo "═══════════════════════════════════════"
 
+# Images pullen
+echo "📦 Lade Docker Images..."
 docker compose -f "${COMPOSE_FILE}" pull
+
+# Container starten
+echo "🚀 Starte Container..."
 docker compose -f "${COMPOSE_FILE}" up -d
 
 echo "⏳ Warte auf Datenbankstart (30 Sekunden)..."
@@ -297,11 +321,12 @@ echo "════════════════════════�
 echo "🗄️  Datenbank initialisieren"
 echo "═══════════════════════════════════════"
 
-# Migrationen mit Retry
+# Warte auf Datenbank
 retry_command \
-    "docker compose -f '${COMPOSE_FILE}' exec -T db psql -U obico -d obico -c 'SELECT 1;'" \
-    "Warte auf Datenbank..."
+    "docker compose -f '${COMPOSE_FILE}' exec -T db pg_isready -U obico" \
+    "Warte auf PostgreSQL..."
 
+# Migrationen ausführen
 retry_command \
     "docker compose -f '${COMPOSE_FILE}' run --rm web python manage.py migrate --noinput" \
     "Führe Datenbankmigrationen aus..."
@@ -314,26 +339,27 @@ echo "════════════════════════�
 echo "🌐 Django Site konfigurieren"
 echo "═══════════════════════════════════════"
 
-# KRITISCH: Django Site korrekt setzen
-# Methode 1: Via Django Shell (robuster)
-docker compose -f "${COMPOSE_FILE}" run --rm web python manage.py shell <<PYTHON_SCRIPT
+# Django Site via Python Shell setzen
+docker compose -f "${COMPOSE_FILE}" run --rm web python manage.py shell <<PYTHONSCRIPT
 from django.contrib.sites.models import Site
+import os
+
+site_domain = os.environ.get('SITE_DOMAIN', '${SITE_DOMAIN}')
+
 try:
     site = Site.objects.get(id=1)
-    site.domain = '${SITE_DOMAIN}'
+    site.domain = site_domain
     site.name = 'Obico Server'
     site.save()
     print(f'✓ Site aktualisiert: {site.domain}')
 except Site.DoesNotExist:
-    site = Site.objects.create(id=1, domain='${SITE_DOMAIN}', name='Obico Server')
+    site = Site.objects.create(id=1, domain=site_domain, name='Obico Server')
     print(f'✓ Site erstellt: {site.domain}')
-PYTHON_SCRIPT
 
-# Alternative: Via Management Command (falls vorhanden)
-docker compose -f "${COMPOSE_FILE}" run --rm web python manage.py shell -c "
-from django.contrib.sites.models import Site
-Site.objects.update_or_create(id=1, defaults={'domain': '${SITE_DOMAIN}', 'name': 'Obico Server'})
-" 2>/dev/null || true
+# Verify
+all_sites = Site.objects.all()
+print(f'Alle Sites: {list(all_sites.values_list("domain", flat=True))}')
+PYTHONSCRIPT
 
 echo "═══════════════════════════════════════"
 echo "🔄 Services neu starten"
@@ -341,8 +367,8 @@ echo "════════════════════════�
 
 docker compose -f "${COMPOSE_FILE}" restart
 
-echo "⏳ Warte auf Service-Start (15 Sekunden)..."
-sleep 15
+echo "⏳ Warte auf Service-Start (20 Sekunden)..."
+sleep 20
 
 # Status prüfen
 echo ""
@@ -350,242 +376,26 @@ echo "📊 Container Status:"
 docker compose -f "${COMPOSE_FILE}" ps
 
 echo ""
-echo "✅ Installation abgeschlossen!"
-
-CONTAINER_SCRIPT
-)"
-
-# Variablen in Container-Script ersetzen
-CONTAINER_SCRIPT_CONTENT=$(cat <<'CONTAINER_SCRIPT'
-#!/bin/bash
-set -e
-
-# Funktion für Retry-Logik
-retry_command() {
-    local cmd="$1"
-    local desc="$2"
-    local max_attempts=20
-    local attempt=1
-    
-    echo "⏳ $desc"
-    while [ $attempt -le $max_attempts ]; do
-        echo "   Versuch $attempt/$max_attempts..."
-        if eval "$cmd" 2>&1; then
-            echo "   ✓ Erfolgreich"
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        sleep 5
-    done
-    
-    echo "   ✗ Fehlgeschlagen nach $max_attempts Versuchen"
-    return 1
-}
-
-# Variablen aus Host übernehmen
-DB_PASS="__DB_PASS__"
-REDIS_PASS="__REDIS_PASS__"
-ADMIN_EMAIL="__ADMIN_EMAIL__"
-GIT_URL="__GIT_URL__"
-SITE_DOMAIN="__SITE_DOMAIN__"
-CONTAINER_IP="__CONTAINER_IP__"
-
-echo "═══════════════════════════════════════"
-echo "🔧 Systemvorbereitung"
-echo "═══════════════════════════════════════"
-
-# Grundsystem aktualisieren
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-
-# Docker installieren
-echo "📦 Installiere Docker..."
-apt-get install -y \
-    curl \
-    git \
-    ca-certificates \
-    gnupg \
-    lsb-release
-
-# Offizieller Docker GPG Key
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-# Docker Repository
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-systemctl enable docker
-systemctl start docker
-
-echo "═══════════════════════════════════════"
-echo "📥 Obico Server klonen"
-echo "═══════════════════════════════════════"
-
-cd /opt
-if [ -d "obico" ]; then
-    rm -rf obico
-fi
-
-git clone ${GIT_URL} obico
-cd /opt/obico
-
-echo "═══════════════════════════════════════"
-echo "⚙️  Konfiguration erstellen"
-echo "═══════════════════════════════════════"
-
-# .env Datei erstellen
-cat > .env <<ENVFILE
-# Datenbank
-POSTGRES_PASSWORD=${DB_PASS}
-POSTGRES_USER=obico
-POSTGRES_DB=obico
-
-# Redis
-REDIS_PASSWORD=${REDIS_PASS}
-
-# Django Settings
-DEBUG=False
-ALLOWED_HOSTS=${SITE_DOMAIN},${CONTAINER_IP},localhost,127.0.0.1
-SITE_USES_HTTPS=False
-SITE_IS_PUBLIC=True
-
-# Email (Optional - später konfigurierbar)
-EMAIL_HOST=localhost
-EMAIL_PORT=25
-
-# Obico Einstellungen
-ACCOUNT_ALLOW_SIGN_UP=True
-SOCIAL_LOGIN=False
-
-# Web Server
-WEB_HOST=0.0.0.0
-WEB_PORT=3334
-
-# Internes Netzwerk
-INTERNAL_MEDIA_HOST=http://web:3334
-OCTOPRINT_TUNNEL_PORT_RANGE=0-0
-ENVFILE
-
-echo "✓ .env Datei erstellt"
-
-# Docker Compose Datei finden
-COMPOSE_FILE=""
-if [ -f "docker-compose.yml" ]; then
-    COMPOSE_FILE="docker-compose.yml"
-elif [ -f "compose/docker-compose.yml" ]; then
-    COMPOSE_FILE="compose/docker-compose.yml"
-else
-    echo "❌ Keine docker-compose.yml gefunden!"
-    exit 1
-fi
-
-echo "✓ Verwende: $COMPOSE_FILE"
-
-# Docker Compose Datei anpassen für externe Zugriffe
-cat > docker-compose.override.yml <<'OVERRIDE'
-version: '3'
-services:
-  web:
-    environment:
-      - CSRF_TRUSTED_ORIGINS=http://${SITE_DOMAIN}
-    ports:
-      - "3334:3334"
-    restart: unless-stopped
-  
-  ml_api:
-    restart: unless-stopped
-  
-  db:
-    restart: unless-stopped
-    volumes:
-      - db_data:/var/lib/postgresql/data
-  
-  redis:
-    restart: unless-stopped
-
-volumes:
-  db_data:
-OVERRIDE
-
-echo "✓ docker-compose.override.yml erstellt"
-
-echo "═══════════════════════════════════════"
-echo "🚀 Docker Container starten"
-echo "═══════════════════════════════════════"
-
-docker compose -f "${COMPOSE_FILE}" pull
-docker compose -f "${COMPOSE_FILE}" up -d
-
-echo "⏳ Warte auf Datenbankstart (30 Sekunden)..."
-sleep 30
-
-echo "═══════════════════════════════════════"
-echo "🗄️  Datenbank initialisieren"
-echo "═══════════════════════════════════════"
-
-# Migrationen mit Retry
-retry_command \
-    "docker compose -f '${COMPOSE_FILE}' exec -T db psql -U obico -d obico -c 'SELECT 1;'" \
-    "Warte auf Datenbank..."
-
-retry_command \
-    "docker compose -f '${COMPOSE_FILE}' run --rm web python manage.py migrate --noinput" \
-    "Führe Datenbankmigrationen aus..."
-
-# Statische Dateien sammeln
-echo "📦 Sammle statische Dateien..."
-docker compose -f "${COMPOSE_FILE}" run --rm web python manage.py collectstatic --noinput || true
-
-echo "═══════════════════════════════════════"
-echo "🌐 Django Site konfigurieren"
-echo "═══════════════════════════════════════"
-
-# KRITISCH: Django Site korrekt setzen
-docker compose -f "${COMPOSE_FILE}" run --rm web python manage.py shell <<PYTHON_SCRIPT
-from django.contrib.sites.models import Site
-try:
-    site = Site.objects.get(id=1)
-    site.domain = '${SITE_DOMAIN}'
-    site.name = 'Obico Server'
-    site.save()
-    print(f'✓ Site aktualisiert: {site.domain}')
-except Site.DoesNotExist:
-    site = Site.objects.create(id=1, domain='${SITE_DOMAIN}', name='Obico Server')
-    print(f'✓ Site erstellt: {site.domain}')
-PYTHON_SCRIPT
-
-echo "═══════════════════════════════════════"
-echo "🔄 Services neu starten"
-echo "═══════════════════════════════════════"
-
-docker compose -f "${COMPOSE_FILE}" restart
-
-echo "⏳ Warte auf Service-Start (15 Sekunden)..."
-sleep 15
-
-# Status prüfen
-echo ""
-echo "📊 Container Status:"
-docker compose -f "${COMPOSE_FILE}" ps
+echo "📋 Web Service Logs (letzte 20 Zeilen):"
+docker compose -f "${COMPOSE_FILE}" logs --tail=20 web
 
 echo ""
-echo "✅ Installation abgeschlossen!"
+echo "✅ Installation im Container abgeschlossen!"
 
-CONTAINER_SCRIPT
-)
+EOFSCRIPT
 
-# Variablen ersetzen und ausführen
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__DB_PASS__/$DB_PASS}"
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__REDIS_PASS__/$REDIS_PASS}"
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__ADMIN_EMAIL__/$ADMIN_EMAIL}"
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__GIT_URL__/$GIT_URL}"
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__SITE_DOMAIN__/$SITE_DOMAIN}"
-CONTAINER_SCRIPT_CONTENT="${CONTAINER_SCRIPT_CONTENT//__CONTAINER_IP__/$IP_ADDRESS}"
+# --- Script in Container kopieren und ausführen ---
+echo "📤 Kopiere Installations-Script in Container..."
+pct push $CTID "$INSTALL_SCRIPT" /tmp/install.sh
 
-pct exec $CTID -- bash -c "$CONTAINER_SCRIPT_CONTENT"
+echo "🔧 Mache Script ausführbar..."
+pct exec $CTID -- chmod +x /tmp/install.sh
+
+echo "🚀 Starte Installation im Container..."
+pct exec $CTID -- /tmp/install.sh "$DB_PASS" "$REDIS_PASS" "$ADMIN_EMAIL" "$GIT_URL" "$SITE_DOMAIN" "$IP_ADDRESS"
+
+# Cleanup
+rm -f "$INSTALL_SCRIPT"
 
 # --- Finale Ausgabe ---
 clear
@@ -603,6 +413,8 @@ echo "📦 Container ID    : $CTID"
 echo "🏷️  Hostname        : $HOSTNAME"
 echo "🔑 Root Passwort   : $ROOTPASS"
 echo "🌐 IP-Adresse      : $IP_ADDRESS"
+echo "🔧 DB Password     : $DB_PASS"
+echo "🔧 Redis Password  : $REDIS_PASS"
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}Zugriff auf Obico${NC}"
@@ -621,13 +433,21 @@ echo "Container betreten:"
 echo "  pct enter $CTID"
 echo ""
 echo "Logs anzeigen:"
-echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml logs -f"
+echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml logs -f web"
 echo ""
-echo "Services neu starten:"
+echo "Alle Services neu starten:"
 echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml restart"
+echo ""
+echo "Services Status:"
+echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml ps"
 echo ""
 echo "Admin-User manuell erstellen (falls nötig):"
 echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml run --rm web python manage.py createsuperuser"
 echo ""
+echo -e "${YELLOW}Bei Problemen:${NC}"
+echo "  pct exec $CTID -- docker compose -f /opt/obico/docker-compose.yml logs web"
+echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "💾 Konfiguration gespeichert in: /opt/obico/"
 echo ""

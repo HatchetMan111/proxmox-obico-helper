@@ -111,9 +111,6 @@ sed -i 's/REDIS_PASSWORD=.*/REDIS_PASSWORD=obico123/' .env
 sed -i 's/WEB_HOST=.*/WEB_HOST=localhost/' .env
 docker compose up -d
 "
-# --- IP-Adresse abrufen ---
-IP=$(pct exec $CTID ip -4 addr show dev eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
-
 # --- Ausgabe ---
 clear
 echo -e "\e[1;32m✅ ${APP} erfolgreich installiert!\e[0m"

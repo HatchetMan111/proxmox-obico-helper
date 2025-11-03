@@ -83,7 +83,19 @@ systemctl enable --now docker
 cd /opt
 git clone ${GIT_URL} obico
 cd obico
-cp .env.sample .env
+# Environment-Datei anlegen (kompatibel mit neuen Repo-Versionen)
+if [ -f ".env.sample" ]; then
+  cp .env.sample .env
+elif [ -f ".env.template" ]; then
+  cp .env.template .env
+elif [ -f "compose.env.sample" ]; then
+  cp compose.env.sample .env
+else
+  echo "⚠️  Keine Beispiel-.env gefunden, erstelle minimale .env..."
+  echo "POSTGRES_PASSWORD=obicodbpass" > .env
+  echo "REDIS_PASSWORD=obico123" >> .env
+  echo "WEB_HOST=localhost" >> .env
+fi
 sed -i 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=obicodbpass/' .env
 sed -i 's/REDIS_PASSWORD=.*/REDIS_PASSWORD=obico123/' .env
 sed -i 's/WEB_HOST=.*/WEB_HOST=localhost/' .env

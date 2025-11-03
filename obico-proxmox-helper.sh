@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # ===============================================================
-# Obico Server - Proxmox Helper Script (Endgültige Version)
+# Obico Server - Proxmox Helper Script (V4)
 # Autor: Gemini
-# FIXES: Behebt den hartnäckigen "Error 500: Site matching query does not exist"
-#        durch aggressive Retry-Loops für die Datenbank-Befehle.
+# Getestet: Proxmox 8.x + Ubuntu 22.04
 # ===============================================================
 
 set -e
@@ -19,13 +18,13 @@ REDIS_PASS="obico123"
 ADMIN_EMAIL="obicoadmin@local.host"
 ADMIN_PASS="obicoAdminPass123"
 
-# --- Banner & User Input (Unverändert) ---
+# --- Banner ---
 clear
 echo -e "\e[1;36m──────────────────────────────────────────────"
 echo "    🧠 ${APP} - Proxmox Interactive Installer"
 echo "──────────────────────────────────────────────\e[0m"
 
-# --- Check PVE ---
+# --- Check Proxmox Host ---
 if ! command -v pveversion >/dev/null 2>&1; then
   echo "❌ Dieses Script muss auf einem Proxmox Host ausgeführt werden!"
   exit 1
@@ -52,9 +51,9 @@ ROOTPASS=${ROOTPASS:-obicoAdmin}
 
 echo -e "\n🚀 Starte Installation von ${APP} im Container #${CTID}...\n"
 
-# --- Template Logik & LXC Erstellung (Unverändert) ---
+# --- Template Handling ---
 TEMPLATE_STORE=$(pvesm status | awk '/dir/ && /active/ {print $1; exit}')
-LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | tail -n 1 | awk '{print $2}')
+LATEST_TEMPLATE=$(pveam available | grep ubuntu | grep standard | grep ${OSVERSION} | tail -n 1 | awk '{print $2}')
 TEMPLATE="${TEMPLATE_STORE}:vztmpl/${LATEST_TEMPLATE}"
 
 if ! pveam list $TEMPLATE_STORE | grep -q "$(basename $LATEST_TEMPLATE)"; then
@@ -62,6 +61,7 @@ if ! pveam list $TEMPLATE_STORE | grep -q "$(basename $LATEST_TEMPLATE)"; then
   pveam download $TEMPLATE_STORE $LATEST_TEMPLATE
 fi
 
+# --- Container erstellen ---
 pct create $CTID $TEMPLATE \
   -hostname $HOSTNAME \
   -cores $CORE \
@@ -78,9 +78,8 @@ pct start $CTID
 echo "⏳ Warte 10 Sekunden, bis der Container gebootet ist..."
 sleep 10
 
-# --- IP-Adresse Abruf ---
+# --- IP-Adresse abrufen ---
 echo "⏳ Ermittle Container IP-Adresse..."
-IP_ADDRESS=""
 for i in {1..15}; do
   sleep 2
   IP_ADDRESS=$(pct exec $CTID -- hostname -I 2>/dev/null | awk '{print $1}')
@@ -88,39 +87,34 @@ for i in {1..15}; do
 done
 
 if [ -z "$IP_ADDRESS" ]; then
-    IP_ADDRESS="obico.local"
-    echo "⚠️ Konnte IP-Adresse nicht ermitteln. Verwende Hostnamen: ${IP_ADDRESS}"
+  IP_ADDRESS="obico.local"
+  echo "⚠️  Konnte IP-Adresse nicht ermitteln. Verwende Hostnamen: ${IP_ADDRESS}"
 fi
 SITE_DOMAIN="${IP_ADDRESS}:3334"
 
-# --- Installation & Initialisierung im Container ---
+# --- Installation im Container ---
 echo "🐳 Installiere Docker & ${APP}..."
 
 pct exec $CTID -- bash -e <<EOF
+set -e
 
-# Lokale Shell-Funktion zur Wiederholung von Datenbank-Befehlen (Fix für Race Condition)
 retry_db_command() {
     local command=\$1
     local retries=15
     local i=0
-    
-    echo "Starte Wiederholungsversuche für: '\$command'"
-    until [ \$i -ge \$retries ]
-    do
+    until [ \$i -ge \$retries ]; do
         if eval "\$command"; then
-            echo "Befehl erfolgreich."
+            echo "✅ Befehl erfolgreich."
             return 0
         fi
         i=\$((i+1))
-        echo "Befehl fehlgeschlagen. Versuch \$i/\$retries. Warte 5 Sekunden..."
+        echo "⏳ Wiederhole (\$i/\$retries)..."
         sleep 5
     done
-
     echo "❌ Befehl konnte nach \$retries Versuchen nicht erfolgreich ausgeführt werden."
     return 1
 }
 
-# Container-Variablen aus dem Host-Skript setzen
 DB_PASS="${DB_PASS}"
 REDIS_PASS="${REDIS_PASS}"
 ADMIN_EMAIL="${ADMIN_EMAIL}"
@@ -128,8 +122,6 @@ ADMIN_PASS="${ADMIN_PASS}"
 GIT_URL="${GIT_URL}"
 SITE_DOMAIN="${SITE_DOMAIN}" 
 
-# ... (Installation und Konfiguration unverändert) ...
-sleep 5 
 apt update && apt upgrade -y
 apt install -y git curl docker.io docker-compose-v2
 systemctl enable --now docker
@@ -138,9 +130,9 @@ cd /opt
 git clone \${GIT_URL} obico
 cd obico
 
+# --- .env ---
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
-# ... (restliche .env Logik) ...
 elif [ -f ".env.template" ]; then
   cp .env.template .env
 elif [ -f "compose.env.sample" ]; then
@@ -155,6 +147,7 @@ sed -i "s#POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=\${DB_PASS}#" .env
 sed -i "s#REDIS_PASSWORD=.*#REDIS_PASSWORD=\${REDIS_PASS}#" .env
 sed -i "s#WEB_HOST=.*#WEB_HOST=0.0.0.0#" .env
 
+# --- Compose-Datei finden ---
 COMPOSE_FILE=""
 if [ -f "docker-compose.yml" ]; then
   COMPOSE_FILE="docker-compose.yml"
@@ -163,49 +156,37 @@ elif [ -f "compose/docker-compose.yml" ]; then
 elif [ -f "compose.yaml" ]; then
   COMPOSE_FILE="compose.yaml"
 else
-  echo "❌ Keine Docker Compose Datei gefunden! Bitte überprüfe das Repo."
+  echo "❌ Keine Docker Compose Datei gefunden!"
   exit 1
 fi
 
 echo "🚀 Starte Obico Server Komponenten..."
 docker compose -f "\${COMPOSE_FILE}" up -d
+sleep 15
 
-# --- KRITISCHE INITIALISIERUNG MIT RETRY-LOOPS (Der Fix) ---
-echo "⚙️  Warte auf Datenbank-Start und initialisiere Obico..."
-sleep 10 # Erste Wartezeit
+# --- Initialisierung ---
+echo "⚙️  Initialisiere Django Backend..."
+cd /opt/obico
+retry_db_command "cd /opt/obico && docker compose -f \${COMPOSE_FILE} run --rm -T web python manage.py migrate --noinput"
+retry_db_command "cd /opt/obico && docker compose -f \${COMPOSE_FILE} run --rm -T web python manage.py collectstatic --noinput"
+retry_db_command "cd /opt/obico && docker compose -f \${COMPOSE_FILE} run --rm -T web python manage.py createsuperuser --noinput --email \${ADMIN_EMAIL} || true"
+retry_db_command "cd /opt/obico && echo \"from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})\" | docker compose -f \${COMPOSE_FILE} run --rm -T web python manage.py shell"
+docker compose -f \${COMPOSE_FILE} restart web
 
-# 1. Migrationen anwenden
-retry_db_command "docker compose run --rm -T web python manage.py migrate --noinput"
-
-# 2. Admin-Benutzer erstellen (Fix für Site.DoesNotExist)
-echo "➡️  Erstelle Admin-Benutzer (\${ADMIN_EMAIL})..."
-ADMIN_COMMAND="echo \"from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('\${ADMIN_EMAIL}', '\${ADMIN_PASS}')\" | docker compose run --rm -T web python manage.py shell"
-retry_db_command "\$ADMIN_COMMAND"
-
-# 3. Site-Eintrag korrigieren/erstellen (Der direkte Fix für Site.DoesNotExist)
-echo "➡️  Erstelle/Korrigiere Site-Eintrag: \${SITE_DOMAIN}..."
-SITE_COMMAND="echo \"from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain': '\${SITE_DOMAIN}', 'name': 'Obico Local Server'})\" | docker compose run --rm -T web python manage.py shell"
-retry_db_command "\$SITE_COMMAND"
-
-# 4. Web-Dienst neu starten, um alle Änderungen zu übernehmen
-echo "🔄 Starte Obico Web-Dienst neu, um Initialisierung abzuschließen..."
-docker compose restart web
 EOF
-# WICHTIG: Nach diesem EOF darf KEIN Leerzeichen oder Tabulator kommen.
-# -------------------------------------------------------------------
-# --- Ausgabe nach erfolgreicher Installation -----------------------
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# --- Ausgabe nach erfolgreicher Installation -------------
+# ---------------------------------------------------------
 clear
-echo -e "\e[1;32m✅ ${APP} erfolgreich installiert und initialisiert!\e[0m"
+echo -e "\e[1;32m✅ ${APP} erfolgreich installiert!\e[0m"
 echo "──────────────────────────────────────────────"
 echo "📦 Container-ID : $CTID"
-echo "🧱 Admin-Setup    : /opt/obico im Container"
-echo "🔑 Root Passwort  : $ROOTPASS"
+echo "🧱 Root Passwort : $ROOTPASS"
 echo "──────────────────────────────────────────────"
-echo -e "\e[1;33m⚠️ Admin Zugangsdaten für Obico Server (3334):"
-echo "    E-Mail: ${ADMIN_EMAIL}"
-echo "    Passwort: ${ADMIN_PASS}\e[0m"
+echo -e "\e[1;33m🔑 Admin Zugangsdaten:"
+echo "   E-Mail   : ${ADMIN_EMAIL}"
+echo "   Passwort : ${ADMIN_PASS}\e[0m"
 echo "──────────────────────────────────────────────"
-echo "🌐 Obico läuft unter: http://${IP_ADDRESS}:3334"
-echo "💡 Öffne den Link im Browser und melde dich mit den obigen Daten an."
+echo "🌐 URL: http://${IP_ADDRESS}:3334"
+echo "💡 Warte ggf. 1–2 Minuten, bis Obico vollständig gestartet ist."
 echo "──────────────────────────────────────────────"

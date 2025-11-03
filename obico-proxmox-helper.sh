@@ -76,14 +76,14 @@ sleep 10
 # --- Installation im Container ---
 echo "🐳  Installiere Docker & ${APP}..."
 pct exec $CTID -- bash -c "
+#!/bin/bash
 set -e
 apt update && apt upgrade -y
 apt install -y git curl docker.io docker-compose-v2
 systemctl enable --now docker
 cd /opt
-git clone ${GIT_URL} obico
+git clone https://github.com/TheSpaghettiDetective/obico-server.git obico
 cd obico
-# Environment-Datei anlegen (kompatibel mit neuen Repo-Versionen)
 if [ -f ".env.sample" ]; then
   cp .env.sample .env
 elif [ -f ".env.template" ]; then
@@ -91,19 +91,17 @@ elif [ -f ".env.template" ]; then
 elif [ -f "compose.env.sample" ]; then
   cp compose.env.sample .env
 else
-  echo "⚠️  Keine Beispiel-.env gefunden, erstelle minimale .env..."
   echo "POSTGRES_PASSWORD=obicodbpass" > .env
   echo "REDIS_PASSWORD=obico123" >> .env
   echo "WEB_HOST=localhost" >> .env
 fi
 docker compose up -d
-"
+
 sed -i 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=obicodbpass/' .env
 sed -i 's/REDIS_PASSWORD=.*/REDIS_PASSWORD=obico123/' .env
 sed -i 's/WEB_HOST=.*/WEB_HOST=localhost/' .env
 docker compose up -d
 "
-
 # --- IP-Adresse abrufen ---
 IP=$(pct exec $CTID ip -4 addr show dev eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
 

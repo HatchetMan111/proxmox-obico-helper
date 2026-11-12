@@ -3,7 +3,7 @@
 Interaktiver Installer, der einen vollwertigen **Obico-Server** („The Spaghetti Detective") als LXC-Container auf deinem **Proxmox VE Host** aufsetzt — inklusive Docker CE, automatischer Django-Site-Konfiguration und fertigem Web-Login. Alles lokal in deinem Netzwerk, ohne SSL oder Domain.
 
 [![Proxmox](https://img.shields.io/badge/Proxmox-VE%207%2F8-orange?logo=proxmox)](https://www.proxmox.com)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20LTS-blue?logo=ubuntu)](https://ubuntu.com)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-LTS%20(auto)%20-blue?logo=ubuntu)](https://ubuntu.com)
 [![Docker](https://img.shields.io/badge/Docker-CE%20%2B%20Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -20,7 +20,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-obico-
 ## 🧩 Was das Script macht
 
 1. **Interaktive Abfrage** mit validierten Defaults: Container-ID (freie ID wird vorgeschlagen), Hostname, CPU, RAM, Disk, Storage, Bridge, Root-Passwort (leere Eingabe → automatisch generiertes Passwort)
-2. **Template dynamisch ermitteln:** `pveam update` + automatisch die aktuell verfügbare Ubuntu-22.04-Vorlage wählen — kein hartcodierter Dateiname mehr (Fix für den Fehler `template: no such template`)
+2. **Template dynamisch ermitteln:** `pveam update` + automatisch die neueste verfügbare Ubuntu-LTS-Vorlage wählen — kein hartcodierter Dateiname mehr (Fix für den Fehler `template: no such template`). Ist Ubuntu 22.04 nicht mehr im Index, fällt das Script automatisch auf die neueste verfügbare Ubuntu-Version zurück (für Docker/Obico ohne Bedeutung)
 3. **LXC-Container erstellen:** unprivilegiert, mit `nesting=1,keyctl=1` (Pflicht für Docker-in-LXC)
 4. **Docker CE + Compose-Plugin** aus dem offiziellen Docker-APT-Repo installieren
 5. **Obico Server klonen** und konfigurieren: generierter `DJANGO_SECRET_KEY`, `CSRF_TRUSTED_ORIGINS` (JSON-Format, wie Obico es erwartet) auf die Container-IP, Sign-up aktiviert
@@ -32,7 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HatchetMan111/proxmox-obico-
 | Komponente  | Empfehlung          |
 |-------------|---------------------|
 | Proxmox VE  | 7.x oder 8.x        |
-| Template    | Ubuntu 22.04 LTS (läd das Script automatisch) |
+| Template    | Ubuntu LTS — das Script wählt automatisch die neueste verfügbare Version aus dem `pveam`-Index |
 | RAM         | ≥ 4 GB (der erste Docker-Build von `ml_api`/PyTorch ist speicherhungrig) |
 | Storage     | ≥ 15 GB             |
 | CPU         | ≥ 2 Cores           |
@@ -70,7 +70,7 @@ pct stop <CTID> && pct destroy <CTID>
 
 | Problem | Lösung |
 |---|---|
-| `template: no such template` | Behoben — das Script ermittelt die Template-Version jetzt dynamisch per `pveam`. Falls es trotzdem auftritt: `pveam update` manuell ausführen und erneut starten |
+| `template: no such template` | Behoben — das Script ermittelt die Template-Version jetzt dynamisch per `pveam` und fällt bei fehlender Ubuntu-22.04-Revision automatisch auf die neueste Ubuntu-Version zurück. Wenn gar keine Ubuntu-Templates im Index sind: `pveam update` manuell ausführen und Netzwerk/DNS prüfen |
 | `Container/VM <ID> existiert bereits` | Andere ID wählen oder aufräumen: `pct destroy <ID>` |
 | Erster Aufruf der Weboberfläche lädt lange | Der erste Build (`ml_api`, PyTorch) dauert mehrere Minuten — geduldig bleiben, Logs mit `logs -f web` verfolgen |
 | Keine IP-Adresse nach 90 s | DHCP/Bridge prüfen (`brctl show`, DHCP-Bereich des Routers); Container bleibt bestehen und kann mit `pct start <CTID>` erneut geprüft werden |

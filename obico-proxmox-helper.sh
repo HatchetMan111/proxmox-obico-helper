@@ -23,7 +23,6 @@ NC='\033[0m'
 APP="Obico Server"
 BRIDGE="vmbr0"
 STORAGE="local-lvm"
-OS_VERSION="22.04"
 GIT_URL="https://github.com/TheSpaghettiDetective/obico-server.git"
 
 err()  { echo -e "${RED}❌ $*${NC}" >&2; }
@@ -156,19 +155,43 @@ if ! [[ $CONFIRM =~ ^[JjYy1]$ ]]; then
 fi
 
 # --- Template dynamisch ermitteln (Fix: „no such template") ---
+# Bevorzugt Ubuntu 22.04; ist diese Version nicht (mehr) im pveam-Index,
+# wird automatisch die neueste verfügbare Ubuntu-Version verwendet
+# (für Obico/Docker ohne Bedeutung – der Stack läuft im Container).
 echo ""
-echo "📦 Ubuntu-${OS_VERSION}-Template prüfen..."
+echo "📦 Ubuntu-Template prüfen..."
 pveam update >/dev/null 2>&1 || warn "pveam update fehlgeschlagen – verwende den vorhandenen Template-Index."
-OS_PATTERN="${OS_VERSION//./\\.}"
 
-TEMPLATE_FILE=$(pveam list local 2>/dev/null | grep -Eo "ubuntu-${OS_PATTERN}-standard_[0-9.]+-[0-9]+_amd64\.tar\.(zst|xz)" | sort -V | tail -1 || true)
-if [[ -n $TEMPLATE_FILE ]]; then
+TEMPLATE_FILE=$(pveam list local 2>/dev/null | grep -Eo 'ubuntu-22\.04-standard_[^[:space:]]+_amd64\.tar\.(zst|xz)' | sort -V | tail -1 || true)
+if [[ -z $TEMPLATE_FILE ]]; then
+    TEMPLATE_FILE=$(pveam available 2>/dev/null | grep -Eo 'ubuntu-22\.04-standard_[^[:space:]]+_amd64\.tar\.(zst|xz)' | sort -V | tail -1 || true)
+fi
+
+if [[ -z $TEMPLATE_FILE ]]; then
+    ALL_UBUNTU=$(pveam list local 2>/dev/null | grep -Eo 'ubuntu-[0-9.]+-standard_[^[:space:]]+_amd64\.tar\.(zst|xz)' | sort -uV || true)
+    if [[ -z $ALL_UBUNTU ]]; then
+        ALL_UBUNTU=$(pveam available 2>/dev/null | grep -Eo 'ubuntu-[0-9.]+-standard_[^[:space:]]+_amd64\.tar\.(zst|xz)' | sort -uV || true)
+    fi
+    if [[ -z $ALL_UBUNTU ]]; then
+        err "Keine Ubuntu-Templates im pveam-Index gefunden."
+        UBUNTU_HITS=$(pveam available 2>/dev/null | grep -i ubuntu | head -5 || true)
+        if [[ -n $UBUNTU_HITS ]]; then
+            echo "Ubuntu-Treffer im Index:"
+            echo "$UBUNTU_HITS"
+        else
+            echo "Index enthält keine Ubuntu-Einträge ($(pveam available 2>/dev/null | wc -l) Templates insgesamt)."
+        fi
+        info "Falls die Liste leer ist: 'pveam update' manuell ausführen und Netzwerk/DNS prüfen."
+        die "Installation abgebrochen – es wurde noch kein Container erstellt."
+    fi
+    TEMPLATE_FILE=$(echo "$ALL_UBUNTU" | tail -1)
+    TPL_OS=$(echo "$TEMPLATE_FILE" | sed -E 's/^ubuntu-([0-9.]+)-standard_.*/\1/')
+    warn "Ubuntu 22.04 nicht im pveam-Index – verwende automatisch Ubuntu ${TPL_OS} (für Docker/Obico ohne Bedeutung)."
+fi
+
+if pveam list local 2>/dev/null | grep -q "^local:vztmpl/${TEMPLATE_FILE}\$"; then
     ok "Template bereits lokal vorhanden: ${TEMPLATE_FILE}"
 else
-    TEMPLATE_FILE=$(pveam available 2>/dev/null | grep -Eo "ubuntu-${OS_PATTERN}-standard_[0-9.]+-[0-9]+_amd64\.tar\.(zst|xz)" | sort -V | tail -1 || true)
-    if [[ -z $TEMPLATE_FILE ]]; then
-        die "Kein Ubuntu-${OS_VERSION}-Template im Index gefunden. Bitte prüfe die Ausgabe von 'pveam available'."
-    fi
     echo "⬇️  Lade ${TEMPLATE_FILE} herunter..."
     pveam download local "$TEMPLATE_FILE"
 fi

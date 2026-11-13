@@ -44,6 +44,14 @@ info() { echo -e "${CYAN}ℹ️  $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 die()  { err "$*"; exit 1; }
 
+# "clear" schlägt fehl, wenn TERM nicht gesetzt ist (CI, cron, nohup) und
+# würde das Script durch "set -e" abbrechen. Deshalb nur bei echtem TTY.
+clear_screen() {
+    if [[ -t 1 ]]; then
+        clear 2>/dev/null || true
+    fi
+}
+
 usage() {
     cat <<EOF
 ${BOLD}Obico Server – Proxmox VE Helper v${SCRIPT_VERSION}${NC}
@@ -112,7 +120,7 @@ for cmd in pct pveam pvesm qm openssl curl awk sed grep sort mktemp tar timeout;
 done
 (( ${#missing[@]} == 0 )) || die "Folgende Befehle fehlen: ${missing[*]} – ist das ein Proxmox-VE-Host?"
 
-clear
+clear_screen
 cat << "EOF"
 ╔═══════════════════════════════════════╗
 ║     OBICO SERVER INSTALLATION         ║
@@ -887,7 +895,7 @@ EOF
 chmod 600 "$INFO_FILE"
 
 # --- Finale Ausgabe ---
-clear
+clear_screen
 cat << "EOF"
 ╔═══════════════════════════════════════╗
 ║     ✅ INSTALLATION ERFOLGREICH       ║

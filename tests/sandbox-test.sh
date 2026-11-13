@@ -154,7 +154,10 @@ make_template() { # <dateiname> [yes|no = enthält /etc/lsb-release]
 
 run_helper() {
     : > "$FAKE_LOG"
-    OBICO_CTID=112 OBICO_ADMIN_EMAIL="admin@example.com" OBICO_BRIDGE=lo \
+    # TERM entfernen: so verhält sich der Lauf wie in CI/cron/nohup und
+    # deckt den "clear bei fehlendem TERM"-Regressionstest ab.
+    env -u TERM \
+        OBICO_CTID=112 OBICO_ADMIN_EMAIL="admin@example.com" OBICO_BRIDGE=lo \
         bash "$BASE/helper-test.sh" --yes > "$BASE/run.log" 2>&1 || true
 }
 
@@ -197,6 +200,7 @@ setup s5
 make_template ubuntu-24.04-standard_24.04-2_amd64.tar.zst yes
 run_helper
 expect "$BASE/run.log" "INSTALLATION ERFOLGREICH" "Installation läuft durch"
+refute "$BASE/run.log" "Installation abgebrochen" "läuft ohne gesetztes TERM durch (clear-Fix)"
 bash -n "$BASE/pushed/obico_install.sh" && { echo "  ✓ inneres Script ist syntaktisch korrekt"; pass=$((pass + 1)); }
 expect "$BASE/pushed/obico-setup.conf" '^CONTAINER_IP=192.168.1.50$' "Container-IP in Config"
 expect "$BASE/pushed/obico-setup.conf" '^DJANGO_SECRET_KEY=[0-9a-f]{64}$' "Secret Key wird generiert"
